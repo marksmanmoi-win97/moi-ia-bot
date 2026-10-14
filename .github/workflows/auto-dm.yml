@@ -1,0 +1,55 @@
+name: Auto-DM Moi.IA
+
+# "Comenta X y te mando la guía": manda el DM con el link y contesta en público.
+# Corre en los servidores de GitHub cada 5 min (el mínimo de GitHub; a veces lo retrasa).
+# Este repo es público: los minutos de Actions son gratis e ilimitados.
+# Apagado por defecto: el horario solo corre si la variable del repo AUTO_DM_ACTIVO = true
+# (Settings → Secrets and variables → Actions → Variables). Así no choca con ManyChat.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      modo:
+        description: "diagnostico = revisa permisos · dry_run = muestra qué haría · enviar = manda de verdad"
+        required: true
+        default: "diagnostico"
+        type: choice
+        options: [diagnostico, dry_run, enviar]
+      redes:
+        description: "ig, fb o ig,fb"
+        required: false
+        default: "ig,fb"
+
+concurrency:
+  group: auto-dm
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  responder:
+    if: github.event_name == 'workflow_dispatch' || vars.AUTO_DM_ACTIVO == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Atender comentarios
+        env:
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          META_GRAPH_VERSION: ${{ secrets.META_GRAPH_VERSION }}
+          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
+          MODO: ${{ github.event.inputs.modo || 'enviar' }}
+          REDES: ${{ github.event.inputs.redes || vars.AUTO_DM_REDES || 'ig,fb' }}
+        run: |
+          case "$MODO" in
+            diagnostico) python scripts/auto_dm.py --diagnostico ;;
+            dry_run)     python scripts/auto_dm.py --dry-run --redes "$REDES" ;;
+            *)           python scripts/auto_dm.py --redes "$REDES" ;;
+          esac
