@@ -282,6 +282,53 @@ def token_pagina(cfg):
             return
 
 
+def cuenta_ig(cfg):
+    """Revisa que IG_USER_ID y el token sirvan para leer la cuenta de IG. Si no, saca el ID de la
+    cuenta de IG ligada a la página (instagram_business_account) y prueba con el token de página."""
+    ig, page = cfg.get("IG_USER_ID"), cfg.get("FB_PAGE_ID")
+    tokens = [("IG_ACCESS_TOKEN", cfg.get("IG_ACCESS_TOKEN")),
+              ("token de página", cfg.get("FB_PAGE_ACCESS_TOKEN"))]
+    ultimo = None
+    for _, tok in tokens:
+        if ig and tok:
+            try:
+                _req("GET", ig, {"fields": "id,username", "access_token": tok})
+                cfg["IG_ACCESS_TOKEN"] = tok
+                return True
+            except MetaError as e:
+                ultimo = e
+    ligado = None
+    for _, tok in tokens:
+        if page and tok:
+            try:
+                ligado = (_req("GET", page, {"fields": "instagram_business_account",
+                                             "access_token": tok})
+                          .get("instagram_business_account", {}).get("id"))
+            except MetaError as e:
+                ultimo = e
+            if ligado:
+                break
+    if ligado:
+        for nombre, tok in tokens:
+            if not tok:
+                continue
+            try:
+                _req("GET", ligado, {"fields": "id,username", "access_token": tok})
+            except MetaError as e:
+                ultimo = e
+                continue
+            if ligado != ig:
+                print("IG_USER_ID: el del secreto no sirve; uso la cuenta de IG ligada a la página "
+                      "(corrige el secreto IG_USER_ID cuando puedas)", flush=True)
+            if nombre != "IG_ACCESS_TOKEN":
+                print("IG_ACCESS_TOKEN no puede leer la cuenta de IG; uso el token de página", flush=True)
+            cfg["IG_USER_ID"], cfg["IG_ACCESS_TOKEN"] = ligado, tok
+            return True
+    print(f"IG: no pude leer la cuenta de Instagram ({ultimo}). Revisa que la cuenta de IG esté "
+          "ligada a la página y asignada al usuario del sistema en Business Suite.", flush=True)
+    return False
+
+
 def diagnostico(cfg):
     for nombre in ("IG_ACCESS_TOKEN", "FB_PAGE_ACCESS_TOKEN"):
         tok = cfg.get(nombre)
@@ -397,7 +444,9 @@ def main(argv=None):
     cfg = load_config()
     VER = cfg.get("META_GRAPH_VERSION") or "v23.0"
     token_pagina(cfg)
+    ok_ig = cuenta_ig(cfg)
     if args.diagnostico:
+        print(f"IG_USER_ID: {'✅ lee la cuenta de Instagram' if ok_ig else '❌ no lee la cuenta de Instagram'}")
         diagnostico(cfg)
         return 0
 
