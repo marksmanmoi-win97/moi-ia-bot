@@ -236,7 +236,12 @@ def diagnostico(cfg):
             print(f"{nombre}: error {e}")
             continue
         scopes = set(d.get("scopes", []))
-        print(f"{nombre}: tipo={d.get('type')} válido={d.get('is_valid')} app={d.get('application')}")
+        vence = d.get("expires_at")
+        vence = "nunca" if not vence else time.strftime("%Y-%m-%d", time.gmtime(vence))
+        print(f"{nombre}: tipo={d.get('type')} válido={d.get('is_valid')} app={d.get('application')} vence={vence}")
+        if nombre == "FB_PAGE_ACCESS_TOKEN" and d.get("type") != "PAGE":
+            print("   ⚠️ No es token de página. Pega este token en el Explorador de la API Graph, consulta "
+                  "me/accounts y usa el access_token de la página.")
         for s in ("instagram_basic", "instagram_manage_comments", "instagram_manage_messages",
                   "pages_messaging", "pages_read_engagement", "pages_manage_engagement",
                   "pages_read_user_content", "pages_manage_metadata"):
