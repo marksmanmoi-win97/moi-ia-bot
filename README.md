@@ -23,7 +23,9 @@ Los logs de Actions son públicos: el bot solo imprime IDs de comentario y la pa
 ## Encenderlo
 1. **Secrets** (Settings → Secrets and variables → Actions → *New repository secret*), los mismos
    del repo Moi_Ali.IA: `IG_USER_ID`, `IG_ACCESS_TOKEN`, `FB_PAGE_ID`, `FB_PAGE_ACCESS_TOKEN`,
-   `META_GRAPH_VERSION`.
+   `META_GRAPH_VERSION`. En `IG_ACCESS_TOKEN` y `FB_PAGE_ACCESS_TOKEN` puede ir el **mismo** token del
+   usuario del sistema (Business Suite → Usuarios del sistema → Generar token, caducidad "Nunca"):
+   el bot saca solo el token de la página.
 2. **Diagnóstico:** Actions → *Auto-DM Moi.IA* → *Run workflow* → modo `diagnostico`. Marca ✅/❌
    cada permiso del token.
 3. **Prueba:** modo `dry_run` (muestra qué haría) y luego `enviar`.

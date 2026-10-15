@@ -224,6 +224,32 @@ def _fecha(s):
 
 
 # ---------- diagnóstico ----------
+def token_pagina(cfg):
+    """Si FB_PAGE_ACCESS_TOKEN no es token de página, lo saca solo con el token del usuario
+    del sistema (/{FB_PAGE_ID}?fields=access_token). Así basta con pegar el mismo token en los dos."""
+    page = cfg.get("FB_PAGE_ID")
+    candidatos = [cfg.get("FB_PAGE_ACCESS_TOKEN"), cfg.get("IG_ACCESS_TOKEN")]
+    actual = candidatos[0]
+    if actual:
+        try:
+            d = _req("GET", "debug_token", {"input_token": actual, "access_token": actual}).get("data", {})
+            if d.get("type") == "PAGE" and d.get("is_valid"):
+                return
+        except MetaError:
+            pass
+    for tok in candidatos:
+        if not (tok and page):
+            continue
+        try:
+            nuevo = _req("GET", page, {"fields": "access_token", "access_token": tok}).get("access_token")
+        except MetaError:
+            continue
+        if nuevo:
+            cfg["FB_PAGE_ACCESS_TOKEN"] = nuevo
+            print("FB_PAGE_ACCESS_TOKEN: saqué el token de página a partir del token del usuario del sistema")
+            return
+
+
 def diagnostico(cfg):
     for nombre in ("IG_ACCESS_TOKEN", "FB_PAGE_ACCESS_TOKEN"):
         tok = cfg.get(nombre)
@@ -240,8 +266,8 @@ def diagnostico(cfg):
         vence = "nunca" if not vence else time.strftime("%Y-%m-%d", time.gmtime(vence))
         print(f"{nombre}: tipo={d.get('type')} válido={d.get('is_valid')} app={d.get('application')} vence={vence}")
         if nombre == "FB_PAGE_ACCESS_TOKEN" and d.get("type") != "PAGE":
-            print("   ⚠️ No es token de página. Pega este token en el Explorador de la API Graph, consulta "
-                  "me/accounts y usa el access_token de la página.")
+            print("   ⚠️ No es token de página y no pude sacarlo solo. Pega en FB_PAGE_ACCESS_TOKEN el mismo "
+                  "token del usuario del sistema (el de IG_ACCESS_TOKEN) y revisa que la página esté asignada a ese usuario.")
         for s in ("instagram_basic", "instagram_manage_comments", "instagram_manage_messages",
                   "pages_messaging", "pages_read_engagement", "pages_manage_engagement",
                   "pages_read_user_content", "pages_manage_metadata"):
@@ -260,6 +286,7 @@ def main(argv=None):
 
     cfg = load_config()
     VER = cfg.get("META_GRAPH_VERSION") or "v23.0"
+    token_pagina(cfg)
     if args.diagnostico:
         diagnostico(cfg)
         return 0
