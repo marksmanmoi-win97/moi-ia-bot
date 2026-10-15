@@ -4,9 +4,11 @@ Revisa los comentarios recientes de Instagram y de la página de Facebook y, a q
 la palabra del post (TOOLS, MACRO, CV...), le manda por DM el link de la guía (respuesta
 privada de Meta) y le contesta en público "te lo mandé por DM".
 
-Pensado para correr cada 30 min en GitHub Actions (.github/workflows/auto-dm.yml). Sin estado:
-un comentario ya está atendido si la cuenta ya le respondió en público, así que no duplica
-(tampoco con ManyChat, que responde como la misma cuenta). Solo stdlib.
+Corre en GitHub Actions (.github/workflows/auto-dm.yml) en modo bucle: revisa cada 15 s durante
+casi 6 h y encadena la siguiente corrida. Sin estado entre corridas: un comentario ya está atendido
+si la cuenta ya le respondió en público, así que no duplica (tampoco con ManyChat, que responde
+como la misma cuenta). Para gastar poco del límite de Meta, en cada vuelta solo pide la lista de
+posts y baja los comentarios de los posts cuyo número de comentarios cambió. Solo stdlib.
 
 Cómo decide la palabra: del pie del post ("Comenta TOOLS..." / "Comment TOOLS...").
 Si el pie está en inglés y existe la guía <PALABRA>_EN en docs/guias.csv, manda esa.
@@ -22,6 +24,7 @@ Uso:
     python scripts/auto_dm.py                    # IG + FB
     python scripts/auto_dm.py --redes ig
     python scripts/auto_dm.py --diagnostico      # permisos del token y nada más
+    python scripts/auto_dm.py --cada 15 --duracion 345   # bucle: revisa cada 15 s por 345 min
 """
 from __future__ import annotations
 import argparse, csv, json, random, re, sys, time, unicodedata
@@ -38,6 +41,9 @@ GRAPH = "https://graph.facebook.com"
 VENTANA_DIAS = 7       # Meta solo permite la respuesta privada dentro de 7 días del comentario
 MAX_ACCIONES = 25      # tope por corrida para no disparar los bloqueos de IG a cuentas nuevas
 PAUSA = 3              # segundos entre envíos
+MAX_POR_HORA = 40      # tope de comentarios atendidos por hora en modo bucle
+FB_CADA = 300          # en modo bucle, Facebook (sin contador de comentarios barato) cada 5 min
+USO_ALTO = 75          # % del límite de Meta (cabeceras de uso) a partir del cual frena
 HANDLE = "@moi_ali.ia"
 
 # Variantes que la gente escribe y que cuentan como la palabra
@@ -54,6 +60,9 @@ PUBLICO = {
 PERMISO = {3, 10, 190, 200, 230, 294, 299}
 # Errores que significan "ese comentario ya tuvo su respuesta privada"
 YA_RESPONDIDO = {10900}
+# Errores de límite de llamadas de Meta: esperar y volver a intentar
+LIMITE = {4, 17, 32, 613, 80001, 80002, 80006}
+USO = {"pct": 0}       # mayor % de uso que reportó Meta en la última llamada
 
 
 class MetaError(Exception):
@@ -80,9 +89,24 @@ def _req(method, path, params=None, body=None):
     req = urllib.request.Request(url, data=data, method=method, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
+            _registra_uso(r.headers)
             return json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         raise MetaError(e.code, e.read().decode(errors="replace")) from None
+
+
+def _registra_uso(headers):
+    """Meta dice qué tan cerca vamos del límite en X-App-Usage / X-Business-Use-Case-Usage."""
+    pct = 0
+    for h in ("x-app-usage", "x-business-use-case-usage", "x-page-usage"):
+        try:
+            d = json.loads(headers.get(h) or "{}")
+        except ValueError:
+            continue
+        for v in ([d] if "call_count" in d else [x for l in d.values() for x in l]):
+            for k in ("call_count", "total_cputime", "total_time"):
+                pct = max(pct, int(v.get(k) or 0))
+    USO["pct"] = pct
 
 
 def _paginado(path, params, max_paginas=5):
@@ -156,9 +180,14 @@ def responder_publico_fb(token, comment_id, texto):
 
 
 # ---------- lectura ----------
-def pendientes_ig(cfg, guias, desde):
+def pendientes_ig(cfg, guias, desde, estado=None):
+    """estado (modo bucle) guarda quién soy y cuántos comentarios tenía cada post: solo se
+    bajan los comentarios de los posts que cambiaron desde la vuelta anterior."""
+    estado = {} if estado is None else estado
     ig, token = cfg["IG_USER_ID"], cfg["IG_ACCESS_TOKEN"]
-    yo = _req("GET", ig, {"fields": "id,username", "access_token": token})
+    if "yo" not in estado:
+        estado["yo"] = _req("GET", ig, {"fields": "id,username", "access_token": token})
+    yo, conteo = estado["yo"], estado.setdefault("conteo", {})
     medios = _paginado(f"{ig}/media", {"fields": "id,caption,timestamp,comments_count",
                                        "limit": 25, "access_token": token}, max_paginas=2)
     for m in medios:
@@ -167,9 +196,12 @@ def pendientes_ig(cfg, guias, desde):
         cta = cta_del_post(m.get("caption"), guias)
         if not cta or not m.get("comments_count"):
             continue
+        if conteo.get(m["id"]) == m["comments_count"]:
+            continue  # sin comentarios nuevos desde la vuelta anterior
         comentarios = _paginado(f"{m['id']}/comments", {
             "fields": "id,text,timestamp,username,from,replies{username,from}",
             "limit": 50, "access_token": token})
+        conteo[m["id"]] = m["comments_count"]
         for c in comentarios:
             if _fecha(c["timestamp"]) < desde:
                 continue
@@ -184,7 +216,7 @@ def pendientes_ig(cfg, guias, desde):
                        "palabra": cta[0], "idioma": cta[1], "fila": cta[2]}
 
 
-def pendientes_fb(cfg, guias, desde):
+def pendientes_fb(cfg, guias, desde, estado=None):
     page, token = cfg["FB_PAGE_ID"], cfg["FB_PAGE_ACCESS_TOKEN"]
     since = int((desde - timedelta(days=60)).timestamp())
     posts = _paginado(f"{page}/posts", {"fields": "id,message,created_time", "since": since,
@@ -275,51 +307,49 @@ def diagnostico(cfg):
 
 
 # ---------- principal ----------
-def main(argv=None):
-    global VER
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--redes", default="ig,fb", help="ig, fb o ig,fb")
-    ap.add_argument("--dry-run", action="store_true", help="no manda nada, solo muestra")
-    ap.add_argument("--diagnostico", action="store_true", help="revisa permisos del token")
-    ap.add_argument("--max", type=int, default=MAX_ACCIONES, help="máximo de comentarios por corrida")
-    args = ap.parse_args(argv)
-
-    cfg = load_config()
-    VER = cfg.get("META_GRAPH_VERSION") or "v23.0"
-    token_pagina(cfg)
-    if args.diagnostico:
-        diagnostico(cfg)
-        return 0
-
-    guias = cargar_guias()
+def atender(cfg, args, guias, redes, estado, cupo):
+    """Una vuelta: busca comentarios pendientes y los atiende. Devuelve (atendidos, fallos)."""
     desde = datetime.now(timezone.utc) - timedelta(days=VENTANA_DIAS) + timedelta(hours=1)
-    redes = [r.strip() for r in args.redes.split(",") if r.strip()]
     lectores = {"ig": (pendientes_ig, ("IG_USER_ID", "IG_ACCESS_TOKEN")),
                 "fb": (pendientes_fb, ("FB_PAGE_ID", "FB_PAGE_ACCESS_TOKEN"))}
+    vistos = estado.setdefault("vistos", set())
     acciones, fallos = 0, 0
 
     for red in redes:
         lector, claves = lectores[red]
         if not all(cfg.get(k) for k in claves) or not cfg.get("FB_PAGE_ID"):
-            print(f"[{red}] faltan credenciales ({', '.join(claves)}, FB_PAGE_ID): me la salto")
+            if not estado.get(f"aviso_{red}"):
+                print(f"[{red}] faltan credenciales ({', '.join(claves)}, FB_PAGE_ID): me la salto")
+                estado[f"aviso_{red}"] = True
             continue
+        if red in estado.get("pausadas", {}) and time.time() < estado["pausadas"][red]:
+            continue
+        if red == "fb" and args.cada and time.time() - estado.get("fb_ultima", 0) < FB_CADA:
+            continue
+        estado["fb_ultima" if red == "fb" else "ig_ultima"] = time.time()
         page_token = cfg.get("FB_PAGE_ACCESS_TOKEN") or cfg.get("IG_ACCESS_TOKEN")
         pub_token = cfg["IG_ACCESS_TOKEN"] if red == "ig" else cfg["FB_PAGE_ACCESS_TOKEN"]
         responder = responder_publico_ig if red == "ig" else responder_publico_fb
         try:
-            pendientes = list(lector(cfg, guias, desde))
+            pendientes = [p for p in lector(cfg, guias, desde, estado.setdefault(red, {}))
+                          if p["comment_id"] not in vistos]
         except MetaError as e:
+            if e.code in LIMITE:
+                raise
             print(f"[{red}] no pude leer comentarios: {e}", flush=True)
             fallos += 1
             continue
-        print(f"[{red}] {len(pendientes)} comentario(s) pendientes", flush=True)
+        if pendientes or not args.cada:
+            print(f"[{red}] {len(pendientes)} comentario(s) pendientes", flush=True)
 
         for p in pendientes:
-            if acciones >= args.max:
-                print(f"Tope de {args.max} por corrida; lo demás sale en la siguiente.")
+            if acciones >= min(args.max, cupo):
+                print(f"Tope alcanzado ({min(args.max, cupo)}); lo demás sale en la siguiente vuelta.")
+                estado.pop(red, None)  # que la siguiente vuelta vuelva a bajar los comentarios
                 break
             dm, pub = texto_dm(p["fila"], p["idioma"]), random.choice(PUBLICO[p["idioma"]])
             etiqueta = f"[{red}] comment={p['comment_id']} palabra={p['palabra']} guía={p['fila']['palabra_cta']}"
+            vistos.add(p["comment_id"])
             if args.dry_run:
                 print(f"{etiqueta} [DRY-RUN] DM + respuesta pública: {pub!r}")
                 continue
@@ -333,9 +363,10 @@ def main(argv=None):
                 else:
                     fallos += 1
                     print(f"{etiqueta} DM falló: {e}", flush=True)
-                    if e.code in PERMISO:
-                        print(f"[{red}] Meta no deja mandar DMs con este token (permiso). "
-                              f"Paro {red} en esta corrida. Ver README.md.", flush=True)
+                    if e.code in PERMISO or e.code in LIMITE:
+                        print(f"[{red}] Meta no deja mandar DMs ahorita ({e.code}). "
+                              f"Pauso {red} 30 min. Ver README.md.", flush=True)
+                        estado.setdefault("pausadas", {})[red] = time.time() + 1800
                         break
                     continue  # sin DM no decimos en público que se mandó
             try:
@@ -343,13 +374,71 @@ def main(argv=None):
             except MetaError as e:
                 fallos += 1
                 print(f"{etiqueta} respuesta pública falló: {e}", flush=True)
-                if e.code in PERMISO or "2207051" in e.body:
-                    print(f"[{red}] Meta bloqueó la acción; paro {red} en esta corrida.", flush=True)
+                if e.code in PERMISO or e.code in LIMITE or "2207051" in e.body:
+                    print(f"[{red}] Meta bloqueó la acción; pauso {red} 30 min.", flush=True)
+                    estado.setdefault("pausadas", {})[red] = time.time() + 1800
                     break
             time.sleep(PAUSA)
+    return acciones, fallos
 
-    print(f"Listo: {acciones} atendido(s), {fallos} fallo(s).")
-    return 1 if fallos and not acciones else 0
+
+def main(argv=None):
+    global VER
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--redes", default="ig,fb", help="ig, fb o ig,fb")
+    ap.add_argument("--dry-run", action="store_true", help="no manda nada, solo muestra")
+    ap.add_argument("--diagnostico", action="store_true", help="revisa permisos del token")
+    ap.add_argument("--max", type=int, default=MAX_ACCIONES, help="máximo de comentarios por vuelta")
+    ap.add_argument("--cada", type=float, default=0,
+                    help="modo bucle: segundos entre revisiones (0 = una sola pasada)")
+    ap.add_argument("--duracion", type=float, default=345, help="modo bucle: minutos que dura")
+    args = ap.parse_args(argv)
+
+    cfg = load_config()
+    VER = cfg.get("META_GRAPH_VERSION") or "v23.0"
+    token_pagina(cfg)
+    if args.diagnostico:
+        diagnostico(cfg)
+        return 0
+
+    guias = cargar_guias()
+    redes = [r.strip() for r in args.redes.split(",") if r.strip()]
+    estado = {}
+    if not args.cada:
+        acciones, fallos = atender(cfg, args, guias, redes, estado, args.max)
+        print(f"Listo: {acciones} atendido(s), {fallos} fallo(s).")
+        return 1 if fallos and not acciones else 0
+
+    fin = time.time() + args.duracion * 60
+    print(f"Modo bucle: reviso cada {args.cada:g} s durante {args.duracion:g} min ({', '.join(redes)}).",
+          flush=True)
+    total, total_fallos, vueltas, espera_limite = 0, 0, 0, 0
+    hechos = []  # momentos de cada comentario atendido, para el tope por hora
+    while time.time() < fin:
+        inicio = time.time()
+        hechos = [t for t in hechos if inicio - t < 3600]
+        cupo = MAX_POR_HORA - len(hechos)
+        try:
+            if cupo > 0:
+                a, f = atender(cfg, args, guias, redes, estado, cupo)
+                hechos += [time.time()] * a
+                total, total_fallos = total + a, total_fallos + f
+            espera_limite = 0
+        except MetaError as e:  # límite de llamadas de Meta
+            espera_limite = min(900, (espera_limite or 60) * 2)
+            print(f"Meta pide bajarle ({e.code}); espero {espera_limite // 60} min.", flush=True)
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            print(f"Error de red: {e}; sigo en la siguiente vuelta.", flush=True)
+        vueltas += 1
+        if vueltas % 240 == 0:
+            print(f"… {vueltas} vueltas, {total} atendido(s), uso de Meta {USO['pct']}%", flush=True)
+        espera = espera_limite or args.cada
+        if USO["pct"] >= USO_ALTO:
+            espera = max(espera, args.cada * (4 if USO["pct"] < 90 else 20))
+        time.sleep(max(0, min(espera - (time.time() - inicio), fin - time.time())))
+
+    print(f"Listo: {vueltas} vueltas, {total} atendido(s), {total_fallos} fallo(s).")
+    return 0
 
 
 VER = "v23.0"

@@ -4,7 +4,9 @@ Bot de DMs de **Moi.IA** (@moi_ali.ia): cuando alguien comenta la palabra que pi
 ("Comenta TOOLS…" / "Comment TOOLS…"), le manda por DM el link de la guía y le contesta en
 público "te lo mandé por DM". Funciona en Instagram y en la página de Facebook.
 
-Corre en GitHub Actions cada 5 min. El repo es **público** para que los minutos de Actions sean
+Corre en GitHub Actions y revisa cada **15 segundos**. GitHub no permite horarios de menos de
+5 min, así que el bot se queda corriendo en bucle ~5 h 45 min y al terminar lanza la siguiente
+corrida (el horario de cada 2 h es solo respaldo). El repo es **público** para que los minutos de Actions sean
 gratis e ilimitados; los tokens van en *Secrets*, que no se ven aunque el repo sea público.
 Los logs de Actions son públicos: el bot solo imprime IDs de comentario y la palabra, nunca nombres.
 
@@ -18,7 +20,12 @@ Los logs de Actions son públicos: el bot solo imprime IDs de comentario y la pa
   respuesta privada dentro de 7 días).
 - La palabra sale del pie del post. En posts en inglés manda la guía `<PALABRA>_EN` si existe.
 - No guarda estado: si la cuenta ya respondió el comentario (el bot, ManyChat o tú), lo salta.
-- Máximo 25 comentarios por corrida; se detiene si Meta bloquea la acción o falta un permiso.
+- Para no gastar el límite de llamadas de Meta, cada vuelta pide solo la lista de posts (1 llamada)
+  y baja comentarios únicamente de los posts cuyo contador cambió: ~240 llamadas/hora a 15 s.
+  Si Meta avisa que vamos arriba del 75 % de su límite, o devuelve error de límite, frena solo.
+- Máximo 40 comentarios atendidos por hora; si Meta bloquea la acción o falta un permiso, pausa
+  esa red 30 min.
+- Facebook se revisa cada 5 min (no tiene un contador de comentarios barato).
 
 ## Encenderlo
 1. **Secrets** (Settings → Secrets and variables → Actions → *New repository secret*), los mismos
@@ -30,7 +37,10 @@ Los logs de Actions son públicos: el bot solo imprime IDs de comentario y la pa
    cada permiso del token.
 3. **Prueba:** modo `dry_run` (muestra qué haría) y luego `enviar`.
 4. **Prender el horario:** variable `AUTO_DM_ACTIVO` = `true` (pestaña *Variables*). Opcional
-   `AUTO_DM_REDES` = `ig` para solo Instagram. Antes apaga ManyChat para no contestar dos veces.
+   `AUTO_DM_REDES` = `ig` para solo Instagram y `AUTO_DM_CADA` = segundos entre revisiones (15 si no
+   la pones). Antes apaga ManyChat para no contestar dos veces. Para arrancar sin esperar el
+   horario: *Run workflow* → modo `enviar` con `bucle` marcado.
+5. **Apagarlo:** `AUTO_DM_ACTIVO` = `false` y cancela la corrida que esté en curso en Actions.
 
 ## Qué pide Meta
 | Para | Permiso | Nivel |

@@ -1,13 +1,16 @@
 name: Auto-DM Moi.IA
 
 # "Comenta X y te mando la guía": manda el DM con el link y contesta en público.
-# Corre en los servidores de GitHub cada 5 min (el mínimo de GitHub; a veces lo retrasa).
+# GitHub no deja horarios de menos de 5 min, así que el bot corre en bucle: revisa cada
+# AUTO_DM_CADA segundos (15 por defecto) durante ~5 h 45 min y al terminar lanza la siguiente
+# corrida. El horario de cada 2 h solo es un respaldo por si la cadena se corta.
 # Este repo es público: los minutos de Actions son gratis e ilimitados.
-# Apagado por defecto: el horario solo corre si la variable del repo AUTO_DM_ACTIVO = true
+# Apagado por defecto: solo corre si la variable del repo AUTO_DM_ACTIVO = true
 # (Settings → Secrets and variables → Actions → Variables). Así no choca con ManyChat.
+# Para apagarlo ya: pon AUTO_DM_ACTIVO = false y cancela la corrida en curso en Actions.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "17 */2 * * *"
   workflow_dispatch:
     inputs:
       modo:
@@ -20,19 +23,28 @@ on:
         description: "ig, fb o ig,fb"
         required: false
         default: "ig,fb"
+      bucle:
+        description: "true = se queda revisando cada AUTO_DM_CADA s ~6 h · false = una sola pasada"
+        required: false
+        default: false
+        type: boolean
 
+# Una sola corrida a la vez; la siguiente espera en fila a que termine la actual.
 concurrency:
   group: auto-dm
   cancel-in-progress: false
 
 permissions:
   contents: read
+  actions: write   # para lanzar la siguiente corrida del bucle
 
 jobs:
   responder:
     if: github.event_name == 'workflow_dispatch' || vars.AUTO_DM_ACTIVO == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 355
+    env:
+      BUCLE: ${{ github.event_name == 'schedule' || github.event.inputs.bucle == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,9 +59,17 @@ jobs:
           FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
           MODO: ${{ github.event.inputs.modo || 'enviar' }}
           REDES: ${{ github.event.inputs.redes || vars.AUTO_DM_REDES || 'ig,fb' }}
+          CADA: ${{ vars.AUTO_DM_CADA || '15' }}
         run: |
+          BUC=""
+          if [ "$BUCLE" = "true" ]; then BUC="--cada $CADA --duracion 345"; fi
           case "$MODO" in
             diagnostico) python scripts/auto_dm.py --diagnostico ;;
-            dry_run)     python scripts/auto_dm.py --dry-run --redes "$REDES" ;;
-            *)           python scripts/auto_dm.py --redes "$REDES" ;;
+            dry_run)     python scripts/auto_dm.py --dry-run --redes "$REDES" $BUC ;;
+            *)           python scripts/auto_dm.py --redes "$REDES" $BUC ;;
           esac
+      - name: Lanzar la siguiente corrida del bucle
+        if: ${{ !cancelled() && env.BUCLE == 'true' && vars.AUTO_DM_ACTIVO == 'true' && (github.event.inputs.modo || 'enviar') == 'enviar' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run auto-dm.yml --ref "$GITHUB_REF_NAME" -f modo=enviar -f redes="${{ github.event.inputs.redes || vars.AUTO_DM_REDES || 'ig,fb' }}" -f bucle=true
